@@ -1,7 +1,10 @@
+// lib/main.dart
 import 'package:flutter/material.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:pinput/pinput.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'success_screen.dart'; // make sure this file exists
+import 'package:lottie/lottie.dart';
 
 void main() {
   runApp(const BiometricApp());
@@ -12,9 +15,11 @@ class BiometricApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
+    return MaterialApp(
+      title: 'Biometrics Demo',
       debugShowCheckedModeBanner: false,
-      home: AuthScreen(),
+      theme: ThemeData(primarySwatch: Colors.blue),
+      home: const AuthScreen(),
     );
   }
 }
@@ -27,147 +32,161 @@ class AuthScreen extends StatefulWidget {
 }
 
 class _AuthScreenState extends State<AuthScreen> {
-  final LocalAuthentication auth = LocalAuthentication();
-  final FlutterSecureStorage secureStorage = const FlutterSecureStorage();
-  final TextEditingController controller = TextEditingController();
+  final LocalAuthentication _auth = LocalAuthentication();
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
+  final TextEditingController _pinController = TextEditingController();
 
-  bool biometricAvailable = false;
-  bool isLoading = false;
-  bool isFace = false;
+  bool _biometricAvailable = false;
+  bool _isFace = false;
+  bool _isLoading = false;
 
   @override
   void initState() {
     super.initState();
-    checkBiometric();
-    autoTryBiometric();
+    _checkBiometricsAndPin();
+    // attempt biometric shortly after screen shows
+    Future.delayed(const Duration(milliseconds: 600), () {
+      if (_biometricAvailable) _authenticateBiometric();
+    });
   }
 
-  Future<void> checkBiometric() async {
+  Future<void> _checkBiometricsAndPin() async {
     try {
-      bool can = await auth.canCheckBiometrics;
-      bool supported = await auth.isDeviceSupported();
-      List<BiometricType> types = await auth.getAvailableBiometrics();
+      final canCheck = await _auth.canCheckBiometrics;
+      // if isDeviceSupported is available in your version, you can also call it;
+      // catching errors if it's not present is safe.
+      bool supported = true;
+      try {
+        supported = await _auth.isDeviceSupported();
+      } catch (_) {
+        // older versions may not expose isDeviceSupported — ignore
+      }
 
+      final types = await _auth.getAvailableBiometrics();
       setState(() {
-        biometricAvailable = can && supported;
-        isFace = types.contains(BiometricType.face);
+        _biometricAvailable = (canCheck && supported);
+        _isFace = types.contains(BiometricType.face);
       });
-    } catch (_) {}
-  }
-
-  /// Auto-run fingerprint when screen opens
-  Future<void> autoTryBiometric() async {
-    await Future.delayed(const Duration(milliseconds: 600));
-    authenticateBiometric();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: Column(
-            children: [
-              const SizedBox(height: 20),
-              const Text("Enter PIN", style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 10),
-              const Text("Enter your 4-digit PIN", style: TextStyle(fontSize: 18, color: Colors.grey)),
-              const SizedBox(height: 30),
-
-              Pinput(
-                controller: controller,
-                length: 4,
-                obscureText: true,
-                onCompleted: saveAndLogin,
-              ),
-
-              const Spacer(),
-
-              if (biometricAvailable)
-                Column(
-                  children: [
-                    const Text("or", style: TextStyle(fontSize: 18, color: Colors.grey)),
-                    const SizedBox(height: 12),
-
-                    GestureDetector(
-                      onTap: isLoading ? null : authenticateBiometric,
-                      child: Container(
-                        width: 60,
-                        height: 60,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Colors.blue.shade50,
-                          border: Border.all(color: Colors.blue),
-                        ),
-                        child: Center(
-                          child: isLoading
-                              ? const CircularProgressIndicator(strokeWidth: 2)
-                              : Icon(isFace ? Icons.tag_faces : Icons.fingerprint,
-                              size: 30, color: Colors.blue.shade600),
-                        ),
-                      ),
-                    ),
-
-                    const SizedBox(height: 10),
-                    Text(isFace ? "Use Face Unlock" : "Use Fingerprint",
-                        style: TextStyle(fontSize: 18, color: Colors.blue.shade600)),
-                    const SizedBox(height: 20),
-                  ],
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// ✅ Securely Save PIN & Validate
-  Future<void> saveAndLogin(String value) async {
-    String? savedPin = await secureStorage.read(key: "user_pin");
-
-    if (savedPin == null) {
-      await secureStorage.write(key: "user_pin", value: value);
-      navigate();
-    } else if (savedPin == value) {
-      navigate();
+    } catch (e) {
+      debugPrint('check biometrics error: $e');
+      setState(() {
+        _biometricAvailable = false;
+        _isFace = false;
+      });
     }
-
-    controller.clear();
   }
 
-  Future<void> authenticateBiometric() async {
-    setState(() => isLoading = true);
+  Future<void> _authenticateBiometric() async {
+    if (!_biometricAvailable) return;
+
+    setState(() => _isLoading = true);
 
     try {
-      final authenticated = await auth.authenticate(
-        localizedReason: 'Confirm your identity',
+      // Minimal compatible call — older local_auth versions accept biometricOnly
+      final bool authenticated = await _auth.authenticate(
+        localizedReason: 'Authenticate to continue',
         biometricOnly: true,
       );
 
-      if (authenticated) navigate();
-    } catch (_) {} finally {
-      setState(() => isLoading = false);
+      if (authenticated) {
+        _goToSuccess();
+      }
+    } catch (e) {
+      debugPrint('biometric auth error: $e');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  void navigate() {
+  Future<void> _onPinCompleted(String enteredPin) async {
+    // If there is no stored PIN, save the entered one (first-time)
+    final stored = await _secureStorage.read(key: 'user_pin');
+    if (stored == null) {
+      await _secureStorage.write(key: 'user_pin', value: enteredPin);
+      _goToSuccess();
+    } else if (stored == enteredPin) {
+      _goToSuccess();
+    } else {
+      // wrong PIN
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Wrong PIN')),
+        );
+        _pinController.clear();
+      }
+    }
+  }
+
+  void _goToSuccess() {
     Navigator.pushReplacement(
       context,
-      MaterialPageRoute(builder: (_) => const SecondScreen()),
+      MaterialPageRoute(builder: (_) => const SuccessScreen()),
     );
   }
-}
 
-class SecondScreen extends StatelessWidget {
-  const SecondScreen({super.key});
+  @override
+  void dispose() {
+    _pinController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
-    return const Scaffold(
-      backgroundColor: Colors.green,
-      body: Center(
-        child: Text("Success!",
-            style: TextStyle(fontSize: 32, color: Colors.white, fontWeight: FontWeight.bold)),
+    final inputHint = 'Enter your 4-digit PIN';
+    return Scaffold(
+      body: SafeArea(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 28.0),
+            child: Column(
+              children: [
+                const SizedBox(height: 28),
+                const Text(
+                  'Welcome',
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                Text(inputHint, style: const TextStyle(fontSize: 16, color: Colors.grey)),
+                const SizedBox(height: 28),
+                Pinput(
+                  controller: _pinController,
+                  length: 4,
+                  obscureText: true,
+                  onCompleted: _onPinCompleted,
+                ),
+                const Spacer(),
+                if (_biometricAvailable) ...[
+                  const Text('or', style: TextStyle(color: Colors.grey)),
+                  const SizedBox(height: 12),
+                  GestureDetector(
+                    onTap: _isLoading ? null : _authenticateBiometric,
+                    child: Container(
+                      width: 70,
+                      height: 70,
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.blue.shade200),
+                      ),
+                      child: Center(
+                        child: _isLoading
+                            ? const CircularProgressIndicator(strokeWidth: 2)
+                            : Icon(_isFace ? Icons.tag_faces : Icons.fingerprint,
+                            size: 36, color: Colors.blue.shade700),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(_isFace ? 'Use Face Unlock' : 'Use Fingerprint',
+                      style: TextStyle(fontSize: 16, color: Colors.blue.shade700)),
+                  const SizedBox(height: 28),
+                ] else ...[
+                  const SizedBox(height: 60),
+                ],
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
