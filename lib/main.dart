@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:pinput/pinput.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 void main() {
   runApp(const BiometricApp());
@@ -27,26 +28,37 @@ class AuthScreen extends StatefulWidget {
 
 class _AuthScreenState extends State<AuthScreen> {
   final LocalAuthentication auth = LocalAuthentication();
+  final FlutterSecureStorage secureStorage = const FlutterSecureStorage();
   final TextEditingController controller = TextEditingController();
-  final String pin = "1234";
 
   bool biometricAvailable = false;
   bool isLoading = false;
+  bool isFace = false;
 
   @override
   void initState() {
     super.initState();
     checkBiometric();
+    autoTryBiometric();
   }
 
   Future<void> checkBiometric() async {
     try {
-      final can = await auth.canCheckBiometrics;
-      final supported = await auth.isDeviceSupported();
-      setState(() => biometricAvailable = can && supported);
-    } catch (e) {
-      print(e);
-    }
+      bool can = await auth.canCheckBiometrics;
+      bool supported = await auth.isDeviceSupported();
+      List<BiometricType> types = await auth.getAvailableBiometrics();
+
+      setState(() {
+        biometricAvailable = can && supported;
+        isFace = types.contains(BiometricType.face);
+      });
+    } catch (_) {}
+  }
+
+  /// Auto-run fingerprint when screen opens
+  Future<void> autoTryBiometric() async {
+    await Future.delayed(const Duration(milliseconds: 600));
+    authenticateBiometric();
   }
 
   @override
@@ -66,10 +78,7 @@ class _AuthScreenState extends State<AuthScreen> {
                 controller: controller,
                 length: 4,
                 obscureText: true,
-                onCompleted: (value) {
-                  if (value == pin) navigate();
-                  controller.clear();
-                },
+                onCompleted: saveAndLogin,
               ),
 
               const Spacer(),
@@ -93,16 +102,18 @@ class _AuthScreenState extends State<AuthScreen> {
                         child: Center(
                           child: isLoading
                               ? const CircularProgressIndicator(strokeWidth: 2)
-                              : Icon(Icons.fingerprint, size: 30, color: Colors.blue.shade600),
+                              : Icon(isFace ? Icons.tag_faces : Icons.fingerprint,
+                              size: 30, color: Colors.blue.shade600),
                         ),
                       ),
                     ),
 
                     const SizedBox(height: 10),
-                    Text("Use Fingerprint", style: TextStyle(fontSize: 18, color: Colors.blue.shade600)),
+                    Text(isFace ? "Use Face Unlock" : "Use Fingerprint",
+                        style: TextStyle(fontSize: 18, color: Colors.blue.shade600)),
                     const SizedBox(height: 20),
                   ],
-                )
+                ),
             ],
           ),
         ),
@@ -110,19 +121,31 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
+  /// ✅ Securely Save PIN & Validate
+  Future<void> saveAndLogin(String value) async {
+    String? savedPin = await secureStorage.read(key: "user_pin");
+
+    if (savedPin == null) {
+      await secureStorage.write(key: "user_pin", value: value);
+      navigate();
+    } else if (savedPin == value) {
+      navigate();
+    }
+
+    controller.clear();
+  }
+
   Future<void> authenticateBiometric() async {
     setState(() => isLoading = true);
 
     try {
       final authenticated = await auth.authenticate(
-        localizedReason: 'Scan your fingerprint to continue',
+        localizedReason: 'Confirm your identity',
         biometricOnly: true,
       );
 
       if (authenticated) navigate();
-    } catch (e) {
-      print(e);
-    } finally {
+    } catch (_) {} finally {
       setState(() => isLoading = false);
     }
   }
